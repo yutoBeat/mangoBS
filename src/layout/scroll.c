@@ -1130,3 +1130,71 @@ void exchange_two_scroller_clients(Client *c1, Client *c2) {
 
 	return;
 }
+
+/* Finds the visible scroller-tiled client in the adjacent column.
+ * Left: the tail of the previous column. Right: the head of the next column. */
+static Client *scroller_neighbor_column_client(Client *c, bool right) {
+	Client *edge = right ? scroll_get_stack_tail_client(c)
+						 : scroll_get_stack_head_client(c);
+	struct wl_list *l = right ? edge->link.next : edge->link.prev;
+
+	while (l != &server.clients) {
+		Client *n = wl_container_of(l, n, link);
+		if (VISIBLEON(n, c->mon) && ISSCROLLTILED(n))
+			return n;
+		l = right ? l->next : l->prev;
+	}
+	return NULL;
+}
+
+/* Moves the focused window to the bottom of the adjacent column. */
+void scroller_consume_into_column(Client *c, bool right) {
+	if (!c || !c->mon || !ISSCROLLTILED(c))
+		return;
+
+	update_scroller_state(c->mon); /* make sure nodes exist */
+
+	Client *neighbor = scroller_neighbor_column_client(c, right);
+	if (!neighbor)
+		return;
+
+	/* Append after the tail of the neighbour's column. */
+	Client *target = scroll_get_stack_tail_client(neighbor);
+	scroller_insert_stack(c, target, false);
+}
+
+/* Pulls the focused window out of its column into its own column. */
+void scroller_expel_from_column(Client *c, bool right) {
+	if (!c || !c->mon || !ISSCROLLTILED(c))
+		return;
+
+	Monitor *m = c->mon;
+	uint32_t tag = get_mon_curtag(m);
+	update_scroller_state(m);
+
+	struct TagScrollerState *st = ensure_scroller_state(m, tag);
+	struct ScrollerStackNode *node = find_scroller_node(st, c);
+	if (!node || (!node->prev_in_stack && !node->next_in_stack))
+		return; /* already alone in its column */
+
+	Client *head = scroll_get_stack_head_client(c);
+	Client *tail = scroll_get_stack_tail_client(c);
+
+	/* Unlink from the stack, keep the node in the all-list. */
+	if (node->prev_in_stack)
+		node->prev_in_stack->next_in_stack = node->next_in_stack;
+	if (node->next_in_stack)
+		node->next_in_stack->prev_in_stack = node->prev_in_stack;
+	node->prev_in_stack = NULL;
+	node->next_in_stack = NULL;
+	node->stack_proportion = 0.0f; /* arrange_stack_node resets it */
+
+	/* Fix the client list order so the new column lands on the right side. */
+	if (right && c != tail)
+		wl_list_safe_reinsert_next(&tail->link, &c->link);
+	else if (!right && c != head)
+		wl_list_safe_reinsert_prev(&head->link, &c->link);
+
+	sync_scroller_state_to_clients(m, tag);
+	arrange(m, false, false);
+}
